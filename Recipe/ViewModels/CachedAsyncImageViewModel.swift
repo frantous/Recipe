@@ -10,28 +10,57 @@ import SwiftUI
 @MainActor
 class CachedAsyncImageViewModel: ObservableObject {
     @Published var image: UIImage?
+    @Published var isLoading: Bool = false
+    @Published var errorMessage: String?
     
     private let networkSession: NetworkSession
     private let imageMemoryCache: MemoryCache
     private let imageDiskCache: DiskCache
+    private var task: Task<Void, Never>?
     
     init(dependencies: AppDependencies) {
         self.networkSession = dependencies.networkSession
         self.imageMemoryCache = dependencies.imageMemoryCache
         self.imageDiskCache = dependencies.imageDiskCache
     }
-
+    
     func loadImage(from url: String) async {
+        // Cancel any ongoing task
+        await cancelTask()
+        
+        isLoading = true
+        defer { isLoading = false }
+        
+        task = Task {
+            do {
+                let image = try await fetchImage(forKey: url)
+                await MainActor.run {
+                    self.image = image
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = "Error loading image: \(error)"
+                }
+            }
+        }
+    }
+    
+    private func fetchImage(forKey url: String) async throws -> UIImage? {
+        guard let imageURL = URL(string: url) else {
+            throw APIError.invalidURL
+        }
         let key = createKey(from: url)
         
         if let cachedImage = getImageFromCache(forKey: key) {
-            self.image = cachedImage
-            return
+            return cachedImage
         }
         
-        if let fetchedImage = await fetchImage(forKey: url) {
-            self.image = fetchedImage
+        let imageData = try await networkSession.fetchData(from: imageURL.absoluteString)
+        if let fetchedImage = UIImage(data: imageData) {
+            cacheImage(fetchedImage, forKey: key)
+            return fetchedImage
         }
+        return nil
     }
     
     private func getImageFromCache(forKey key: String) -> UIImage? {
@@ -46,24 +75,6 @@ class CachedAsyncImageViewModel: ObservableObject {
         }
     }
     
-    private func fetchImage(forKey url: String) async -> UIImage? {
-        guard let imageURL = URL(string: url) else {
-            print("Invalid URL: \(url)")
-            return nil
-        }
-        let key = createKey(from: url)
-        do {
-            let imageData = try await networkSession.fetchData(from: imageURL.absoluteString)
-            if let fetchedImage = UIImage(data: imageData) {
-                cacheImage(fetchedImage, forKey: key)
-                return fetchedImage
-            }
-        } catch {
-            print("Error fetching image: \(error)")
-        }
-        return nil
-    }
-    
     private func cacheImage(_ image: UIImage, forKey key: String) {
         imageMemoryCache.cache(image, forKey: key)
         do {
@@ -76,5 +87,10 @@ class CachedAsyncImageViewModel: ObservableObject {
     private func createKey(from urlString: String) -> String {
         let invalidCharacters = "/\\:*?\"<>|."
         return urlString.replacingOccurrences(of: "[\(invalidCharacters)]", with: "#", options: .regularExpression)
+    }
+    
+    private func cancelTask() async {
+        task?.cancel()
+        task = nil
     }
 }

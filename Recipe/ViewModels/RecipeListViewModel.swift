@@ -8,6 +8,7 @@
 import Foundation
 import SwiftUI
 
+@MainActor
 class RecipeListViewModel: ObservableObject {
     @Published var recipes: [Recipe] = []
     @Published var isLoading: Bool = false
@@ -15,22 +16,31 @@ class RecipeListViewModel: ObservableObject {
     
     private let urlSessionManager: NetworkSession
     private let dataDecoder: DataDecoder
+    private var task: Task<Void, Never>?
     
     init(dependencies: AppDependencies) {
         self.urlSessionManager = dependencies.networkSession
         self.dataDecoder = dependencies.dataDecoder
     }
     
-    @MainActor
     func loadRecipes() async {
+        // Cancel any ongoing task
+        await cancelTask()
+        
         isLoading = true
         defer { isLoading = false }
         
-        do {
-            recipes = try await fetchRecipes()
-        } catch {
-            errorMessage = handleError(error)
+        // Create a new task for loading recipes
+        task = Task {
+            do {
+                recipes = try await fetchRecipes()
+            } catch {
+                errorMessage = handleError(error)
+            }
         }
+        
+        // Wait for the task to complete or be cancelled
+        await task?.value
     }
     
     private func fetchRecipes() async throws -> [Recipe] {
@@ -52,6 +62,11 @@ class RecipeListViewModel: ObservableObject {
             case .failure(let error):
                 throw APIError.decodingError(error)
         }
+    }
+    
+    private func cancelTask() async {
+        task?.cancel()
+        task = nil
     }
     
     private func handleError(_ error: Error) -> String {
